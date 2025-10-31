@@ -1,48 +1,25 @@
 #!/bin/bash
-# 自動擴展根分割區以使用全部硬碟空間
-# 適用 Ubuntu / Debian 使用 LVM 的環境
-
 set -e
-
-echo "開始執行磁碟最大化程序..."
-
-# 1. 找出根邏輯卷
+[ "$EUID" -ne 0 ] && echo "請以 root 身份執行" && exit 1
+for c in lsblk growpart pvresize lvextend resize2fs df; do
+  command -v $c >/dev/null 2>&1 || { apt-get update -y >/dev/null 2>&1; apt-get install -y cloud-guest-utils lvm2 >/dev/null 2>&1 || yum install -y cloud-utils-growpart lvm2 >/dev/null 2>&1; break; }
+done
 ROOT_LV=$(df / | tail -1 | awk '{print $1}')
-
-if [[ $ROOT_LV != /dev/mapper/* ]]; then
-    echo "錯誤：系統未使用 LVM，請手動使用 growpart 或 resize2fs。"
-    exit 1
-fi
-
-echo "偵測到根邏輯卷：$ROOT_LV"
-
-# 2. 找出對應的 Volume Group
-VG_NAME=$(sudo lvdisplay "$ROOT_LV" | awk '/VG Name/{print $3}')
-PV_NAME=$(sudo pvs --noheadings -o pv_name | head -1)
-
-echo "Volume Group：$VG_NAME"
-echo "Physical Volume：$PV_NAME"
-
-# 3. 嘗試自動擴展 PV（需有未分配磁碟空間）
-echo "擴展 PV 以使用整顆磁碟..."
-sudo pvresize "$PV_NAME"
-
-# 4. 擴展 LV
-echo "擴展 LV..."
-sudo lvextend -l +100%FREE "$ROOT_LV"
-
-# 5. 根據檔案系統類型自動擴展
 FS_TYPE=$(df -T / | tail -1 | awk '{print $2}')
-echo "檔案系統類型：$FS_TYPE"
-
-if [[ "$FS_TYPE" == "ext4" ]]; then
-    sudo resize2fs "$ROOT_LV"
-elif [[ "$FS_TYPE" == "xfs" ]]; then
-    sudo xfs_growfs /
+if [[ $ROOT_LV == /dev/mapper/* ]]; then
+  VG_NAME=$(lvs --noheadings -o vg_name "$ROOT_LV" | xargs)
+  PV_NAME=$(pvs --noheadings -o pv_name | head -1 | xargs)
+  DISK=$(echo "$PV_NAME" | sed -E 's/[0-9]+$//')
+  PART_NUM=$(echo "$PV_NAME" | grep -o '[0-9]*$')
+  growpart "$DISK" "$PART_NUM" || true
+  pvresize "$PV_NAME" || true
+  lvextend -l +100%FREE "$ROOT_LV" || true
+  [[ "$FS_TYPE" == "ext4" ]] && resize2fs "$ROOT_LV" || [[ "$FS_TYPE" == "xfs" ]] && xfs_growfs /
 else
-    echo "警告：未支援的檔案系統類型 $FS_TYPE，請手動處理。"
+  DEV=$(lsblk -no pkname $(df / | tail -1 | awk '{print $1}') | head -1)
+  PART_NUM=$(lsblk -no name | grep "^$DEV" | tail -1 | grep -o '[0-9]*$')
+  growpart "/dev/$DEV" "$PART_NUM" || true
+  [[ "$FS_TYPE" == "ext4" ]] && resize2fs "$(df / | tail -1 | awk '{print $1}')" || [[ "$FS_TYPE" == "xfs" ]] && xfs_growfs /
 fi
-
-echo
-echo "磁碟擴展完成！目前使用情況如下："
 df -h /
+lsblk
